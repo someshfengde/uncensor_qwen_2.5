@@ -1,0 +1,14 @@
+[project]
+name = "this-studio"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "einops>=0.8.1",
+    "jaxtyping>=0.3.1",
+    "tiktoken>=0.9.0",
+    "transformer-lens>=2.15.0",
+    "transformers>=4.50.3",
+    "transformers-stream-generator>=0.0.5",
+]
