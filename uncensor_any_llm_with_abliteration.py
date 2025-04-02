@@ -36,8 +36,8 @@ MODEL_ID = "Qwen/Qwen2.5-7B-Instruct-1M"
 
 
 # Download and load model
-!git clone https://huggingface.co/{MODEL_ID} 
-
+# !git clone https://huggingface.co/{MODEL_ID} 
+MODEL_TYPE = "Qwen/Qwen2.5-7B-Instruct-1M"
 # Load model and tokenizer
 model = HookedTransformer.from_pretrained_no_processing(
     MODEL_TYPE,
