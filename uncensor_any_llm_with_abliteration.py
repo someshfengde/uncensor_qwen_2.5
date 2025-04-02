@@ -32,12 +32,12 @@ def get_harmless_instructions():
 harmful_inst_train, harmful_inst_test = get_harmful_instructions()
 harmless_inst_train, harmless_inst_test = get_harmless_instructions()
 
-MODEL_ID = "Qwen/Qwen2.5-7B-Instruct-1M"
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 
 
 # Download and load model
 # !git clone https://huggingface.co/{MODEL_ID} 
-MODEL_TYPE = "Qwen/Qwen2.5-7B-Instruct-1M"
+MODEL_TYPE = "Qwen/Qwen2.5-7B-Instruct"
 # Load model and tokenizer
 model = HookedTransformer.from_pretrained_no_processing(
     MODEL_TYPE,
