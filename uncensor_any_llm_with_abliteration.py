@@ -1,4 +1,3 @@
-
 import torch
 import functools
 import einops
@@ -38,16 +37,21 @@ MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 # Download and load model
 # !git clone https://huggingface.co/{MODEL_ID} 
 MODEL_TYPE = "Qwen/Qwen2.5-7B-Instruct"
-# Load model and tokenizer
-model = HookedTransformer.from_pretrained_no_processing(
-    MODEL_TYPE,
+MODEL_PATH = "/teamspace/studios/this_studio/Qwen2.5-7B-Instruct"
+
+# Load model and tokenizer using standard HF transformers
+hf_model = AutoModelForCausalLM.from_pretrained(
+    MODEL_PATH,
     local_files_only=True,
-    dtype=torch.bfloat16,
-    default_padding_side='left'
+    torch_dtype=torch.bfloat16,
+    device_map="auto"
 )
-tokenizer = AutoTokenizer.from_pretrained(MODEL_TYPE)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 tokenizer.padding_side = 'left'
 tokenizer.pad_token = tokenizer.eos_token
+
+# For now, we'll use the HF model directly instead of HookedTransformer
+# We'll need to adjust the rest of the code to work with the standard HF model
 
 def tokenize_instructions(tokenizer, instructions):
     return tokenizer.apply_chat_template(
@@ -86,17 +90,13 @@ for i in tqdm(range(num_batches)):
     end_idx = min(n_inst_train, start_idx + batch_size)
 
     # Run models on harmful and harmless prompts, cache activations
-    harmful_logits, harmful_cache = model.run_with_cache(
+    harmful_logits, harmful_cache = hf_model(
         harmful_tokens[start_idx:end_idx],
-        names_filter=lambda hook_name: 'resid' in hook_name,
-        device='cpu',
-        reset_hooks_end=True
+        output_hidden_states=True,
     )
-    harmless_logits, harmless_cache = model.run_with_cache(
+    harmless_logits, harmless_cache = hf_model(
         harmless_tokens[start_idx:end_idx],
-        names_filter=lambda hook_name: 'resid' in hook_name,
-        device='cpu',
-        reset_hooks_end=True
+        output_hidden_states=True,
     )
 
     # Collect and store the activations
@@ -122,7 +122,7 @@ def get_act_idx(cache_dict, act_name, layer):
 activation_layers = ["resid_pre", "resid_mid", "resid_post"]
 activation_refusals = defaultdict(list)
 
-for layer_num in range(1, model.cfg.n_layers):
+for layer_num in range(1, hf_model.config.n_layers):
     pos = -1  # Position index
 
     for layer in activation_layers:
@@ -142,7 +142,7 @@ selected_layers = ["resid_pre"]
 activation_scored = sorted(
     [
         activation_refusals[layer][l - 1]
-        for l in range(1, model.cfg.n_layers)
+        for l in range(1, hf_model.config.n_layers)
         for layer in selected_layers
     ],
     key=lambda x: abs(x.mean()),
@@ -150,7 +150,7 @@ activation_scored = sorted(
 )
 
 def _generate_with_hooks(
-    model: HookedTransformer,
+    model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     tokens: Int[Tensor, "batch_size seq_len"],
     max_tokens_generated: int = 64,
@@ -163,18 +163,17 @@ def _generate_with_hooks(
     )
     all_tokens[:, : tokens.shape[1]] = tokens
     for i in range(max_tokens_generated):
-        with model.hooks(fwd_hooks=fwd_hooks):
-            logits = model(all_tokens[:, : -max_tokens_generated + i])
-            next_tokens = logits[:, -1, :].argmax(
-                dim=-1
-            )  # greedy sampling (temperature=0)
-            all_tokens[:, -max_tokens_generated + i] = next_tokens
+        logits = model(all_tokens[:, : -max_tokens_generated + i])
+        next_tokens = logits[:, -1, :].argmax(
+            dim=-1
+        )  # greedy sampling (temperature=0)
+        all_tokens[:, -max_tokens_generated + i] = next_tokens
     return tokenizer.batch_decode(
         all_tokens[:, tokens.shape[1] :], skip_special_tokens=True
     )
 
 def get_generations(
-    model: HookedTransformer,
+    model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     instructions: List[str],
     fwd_hooks=[],
@@ -215,7 +214,7 @@ def direction_ablation_hook(
 # Testing baseline
 N_INST_TEST = 4
 baseline_generations = get_generations(
-    model, tokenizer, harmful_inst_test[:N_INST_TEST], fwd_hooks=[]
+    hf_model, tokenizer, harmful_inst_test[:N_INST_TEST], fwd_hooks=[]
 )
 
 # Evaluating layers defined earlier (needs human evaluation to determine best layer for refusal inhibition)
@@ -225,11 +224,11 @@ for refusal_dir in tqdm(activation_scored[:EVAL_N]):
     hook_fn = functools.partial(direction_ablation_hook, direction=refusal_dir)
     fwd_hooks = [
         (utils.get_act_name(act_name, layer), hook_fn)
-        for layer in list(range(model.cfg.n_layers))
+        for layer in list(range(hf_model.config.n_layers))
         for act_name in activation_layers
     ]
     intervention_generations = get_generations(
-        model, tokenizer, harmful_inst_test[:N_INST_TEST], fwd_hooks=fwd_hooks
+        hf_model, tokenizer, harmful_inst_test[:N_INST_TEST], fwd_hooks=fwd_hooks
     )
     evals.append(intervention_generations)
 
@@ -259,19 +258,19 @@ LAYER_CANDIDATE = 9
 refusal_dir = activation_scored[LAYER_CANDIDATE]
 
 # Orthogonalize the model's weights
-if refusal_dir.device != model.W_E.device:
-    refusal_dir = refusal_dir.to(model.W_E.device)
-model.W_E.data = get_orthogonalized_matrix(model.W_E, refusal_dir)
+if refusal_dir.device != hf_model.lm_head.weight.device:
+    refusal_dir = refusal_dir.to(hf_model.lm_head.weight.device)
+hf_model.lm_head.weight.data = get_orthogonalized_matrix(hf_model.lm_head.weight, refusal_dir)
 
-for block in tqdm(model.blocks):
-    if refusal_dir.device != block.attn.W_O.device:
-        refusal_dir = refusal_dir.to(block.attn.W_O.device)
-    block.attn.W_O.data = get_orthogonalized_matrix(block.attn.W_O, refusal_dir)
-    block.mlp.W_out.data = get_orthogonalized_matrix(block.mlp.W_out, refusal_dir)
+for block in tqdm(hf_model.model.layers):
+    if refusal_dir.device != block.self_attn.o_proj.weight.device:
+        refusal_dir = refusal_dir.to(block.self_attn.o_proj.weight.device)
+    block.self_attn.o_proj.weight.data = get_orthogonalized_matrix(block.self_attn.o_proj.weight, refusal_dir)
+    block.mlp.down_proj.weight.data = get_orthogonalized_matrix(block.mlp.down_proj.weight, refusal_dir)
 
 # Generate text with abliterated model
 orthogonalized_generations = get_generations(
-    model, tokenizer, harmful_inst_test[:N_INST_TEST], fwd_hooks=[]
+    hf_model, tokenizer, harmful_inst_test[:N_INST_TEST], fwd_hooks=[]
 )
 
 # Print generations
@@ -283,21 +282,4 @@ for i in range(N_INST_TEST):
     print(f"\033[95mORTHOGONALIZED COMPLETION:\n{orthogonalized_generations[i]}\n")
 
 # Convert model back to HF safetensors
-hf_model = AutoModelForCausalLM.from_pretrained(MODEL_TYPE, torch_dtype=torch.bfloat16)
-lm_model = hf_model.model
-
-state_dict = model.state_dict()
-lm_model.embed_tokens.weight = torch.nn.Parameter(state_dict["embed.W_E"].cpu())
-
-for l in range(model.cfg.n_layers):
-    lm_model.layers[l].self_attn.o_proj.weight = torch.nn.Parameter(
-        einops.rearrange(
-            state_dict[f"blocks.{l}.attn.W_O"], "n h m->m (n h)", n=model.cfg.n_heads
-        ).contiguous()
-    )
-    lm_model.layers[l].mlp.down_proj.weight = torch.nn.Parameter(
-        torch.transpose(state_dict[f"blocks.{l}.mlp.W_out"], 0, 1).contiguous()
-    )
-
-# Push it to the Hugging Face Hub
-hf_model.push_to_hub(NEW_MODEL_ID)
+hf_model.push_to_hub("Qwen/Qwen2.5-7B-Instruct-Orthogonalized")
